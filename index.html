@@ -609,11 +609,12 @@ async function gasGet(params) {
 async function gasPost(body) {
   if (!GAS_URL) { showToast('GAS URLが設定されていません。', 'error'); return null; }
   try {
-    const res = await fetch(GAS_URL, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)
+    // GASはPOSTのCORSプリフライトに非対応のため、
+    // データをJSON文字列化してGETパラメータで送信する
+    const params = new URLSearchParams({
+      data: JSON.stringify(body)
     });
+    const res = await fetch(`${GAS_URL}?${params}`, { method: 'GET' });
     return await res.json();
   } catch (e) {
     showToast('通信エラー: ' + e.message, 'error');
@@ -1256,31 +1257,67 @@ async function submitUpload() {
   const title = document.getElementById('upload-title').value.trim();
   if (!title) { showToast('タイトルを入力してください', 'error'); return; }
   const type = document.querySelector('input[name="ctype"]:checked').value;
+
   showLoading('コンテンツを登録中...');
 
-  // まずコンテンツマスタに登録
-  const r = await gasPost({ action: 'addContent', data: {
-    type, title,
-    related_item: document.getElementById('upload-related').value,
-    memo: document.getElementById('upload-memo').value
-  }});
+  try {
+    // Step1: コンテンツマスタに登録
+    const r = await gasPost({ action: 'addContent', data: {
+      type, title,
+      related_item: document.getElementById('upload-related').value,
+      memo: document.getElementById('upload-memo').value
+    }});
 
-  if (!r || !r.success) { hideLoading(); showToast('登録に失敗しました', 'error'); return; }
+    if (!r || !r.success) {
+      hideLoading();
+      showToast('登録エラー: ' + (r && r.error ? r.error : '通信失敗'), 'error');
+      return;
+    }
 
-  // ファイルがあればアップロード
-  for (const file of selectedFiles) {
-    const base64 = await fileToBase64(file);
-    await gasPost({ action: 'uploadImage', content_id: r.content_id,
-      filename: file.name, base64data: base64, mimetype: file.type });
+    // Step2: 画像アップロード（ファイルがある場合のみ）
+    if (selectedFiles.length > 0) {
+      showLoading(`画像をアップロード中... (0/${selectedFiles.length})`);
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const file = selectedFiles[i];
+        document.getElementById('loading-msg').textContent =
+          `画像をアップロード中... (${i+1}/${selectedFiles.length}) ${file.name}`;
+        try {
+          const base64 = await fileToBase64(file);
+          const up = await gasPost({
+            action: 'uploadImage',
+            content_id: r.content_id,
+            filename: file.name,
+            base64data: base64,
+            mimetype: file.type
+          });
+          if (!up || !up.success) {
+            console.warn('Upload failed for', file.name, up);
+          }
+        } catch (fileErr) {
+          console.warn('File error:', file.name, fileErr);
+        }
+      }
+    }
+
+    hideLoading();
+    showToast('コンテンツを追加しました');
+    closeModal('upload-modal');
+
+    // フォームリセット
+    document.getElementById('upload-title').value = '';
+    document.getElementById('upload-related').value = '';
+    document.getElementById('upload-memo').value = '';
+    document.getElementById('file-preview').innerHTML = '';
+    document.getElementById('file-input').value = '';
+    selectedFiles = [];
+
+    loadContents();
+
+  } catch (err) {
+    hideLoading();
+    showToast('エラーが発生しました: ' + err.message, 'error');
+    console.error('submitUpload error:', err);
   }
-
-  hideLoading();
-  showToast('コンテンツを追加しました');
-  closeModal('upload-modal');
-  document.getElementById('upload-title').value = '';
-  selectedFiles = [];
-  document.getElementById('file-preview').innerHTML = '';
-  loadContents();
 }
 
 function fileToBase64(file) {
